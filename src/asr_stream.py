@@ -51,15 +51,16 @@ class LiveTranscriber:
         mic_q = queue.Queue()
         stop = Event()
         buffer = np.zeros(0, dtype=np.float32)
+        dropped = 0  # samples already cut off the front of buffer, so buffer[0] is sample number `dropped`
 
         # the microphone puts audio into the queue
         def mic_callback(indata, frames, time, status):
             mic_q.put(indata[:, 0].copy())
 
-        # move audio from the queue into the buffer until it's long enough
+        # move audio from the queue into the buffer until sample number n (counted from the start) has arrived
         def wait_for_samples(n):
             nonlocal buffer
-            while len(buffer) < n:
+            while dropped + len(buffer) < n:
                 if stop.is_set():
                     raise StopIteration
                 try:
@@ -68,6 +69,7 @@ class LiveTranscriber:
                     continue
 
         def input_features_generator(first_chunk_inputs):
+            nonlocal buffer, dropped
             yield first_chunk_inputs.input_features[:, : processor.num_mel_frames_first_audio_chunk, :]
 
             mel_frame_idx = processor.num_mel_frames_first_audio_chunk
@@ -82,7 +84,7 @@ class LiveTranscriber:
                 except StopIteration:
                     return
                 inputs = processor(
-                    buffer[start_idx:end_idx],
+                    buffer[start_idx - dropped : end_idx - dropped],  # absolute positions -> positions in buffer
                     sampling_rate=self.sampling_rate,
                     is_streaming=True,
                     is_first_audio_chunk=False,
@@ -93,6 +95,10 @@ class LiveTranscriber:
 
                 mel_frame_idx += processor.num_mel_frames_per_audio_chunk
                 start_idx = mel_frame_idx * hop_length - n_fft // 2
+
+                # audio before the next chunk's start is never read again: cut it off so memory stays constant
+                buffer = buffer[start_idx - dropped :]
+                dropped = start_idx
 
         # run generate in a thread, but print any error instead of failing silently
         def run_generate(**kwargs):
