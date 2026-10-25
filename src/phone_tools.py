@@ -4,7 +4,9 @@ import shlex
 import subprocess
 from urllib.parse import quote_plus
 
-DRY_RUN = False  
+DRY_RUN = False
+
+CONFIRM = None
 
 
 def adb(*args):
@@ -53,19 +55,23 @@ def open_app(app_name: str) -> str:
     return output if output.startswith("Error") else f"Opened {app_name}."
 
 
-# Not named just "call": the LLM's own tool-call format made it pick a tool called "call" for every request.
-# Not "dial_number" either: with that name the LLM often didn't connect "call mom" with this tool.
 def make_phone_call(contact: str) -> str:
     """Call someone: opens the phone's dialer with their number; the user presses the call button.
 
     Args:
         contact: The phone number, or the person's name as saved in the user's contacts.
     """
+
     number, error = number_for(contact)
     if error:
         return error
-    output = adb("shell", "am", "start", "-a", "android.intent.action.DIAL", "-d", f"tel:{number}")
-    return output if output.startswith("Error") else f"The dialer shows {number}. The user must press call."
+    if CONFIRM is None:
+        output = adb("shell", "am", "start", "-a", "android.intent.action.DIAL", "-d", f"tel:{number}")
+        return output if output.startswith("Error") else f"The dialer shows {number}. The user must press call."
+    if not CONFIRM(f"Should I call {contact}?"):
+        return "The user said no, so nobody was called."
+    output = adb("shell", "am", "start", "-a", "android.intent.action.CALL", "-d", f"tel:{number}")
+    return output if output.startswith("Error") else f"Calling {contact} now."
 
 
 def send_sms(contact: str, message: str) -> str:
@@ -78,7 +84,6 @@ def send_sms(contact: str, message: str) -> str:
     number, error = number_for(contact)
     if error:
         return error
-    # adb joins all arguments into one line for the phone's shell, so the message must be quoted
     output = adb("shell", "am", "start", "-a", "android.intent.action.SENDTO", "-d", f"sms:{number}",
                  "--es", "sms_body", shlex.quote(message))
     return output if output.startswith("Error") else f"The message to {number} is ready. The user must press send."
@@ -103,7 +108,6 @@ def battery_report(dumpsys_battery):
     if "level" not in info:
         return "Battery level could not be read."
     percent = round(int(info["level"]) * 100 / int(info.get("scale", 100)))
-    # status codes from Android's BatteryManager: 2 = charging, 5 = full
     state = {"2": "charging", "5": "full"}.get(info.get("status"), "not charging")
     return f"Battery {percent}%, {state}."
 
@@ -155,19 +159,18 @@ def phone_status(item: str) -> str:
         item: What to check: "all" for a full status report, or only one of "battery", "wifi",
             "bluetooth", "do not disturb" or "storage".
     """
-    asked = item.lower().replace(" ", "").replace("-", "")  # "Wi-Fi" -> "wifi", "Do Not Disturb" -> "donotdisturb"
+    asked = item.lower().replace(" ", "").replace("-", "")
     wanted = [key for key in STATUS_CHECKS if key.replace(" ", "") in asked]
-    if not wanted:  # "all", or something we don't recognise: report everything
+    if not wanted:
         wanted = list(STATUS_CHECKS)
     sentences = []
     for key in wanted:
         command, report = STATUS_CHECKS[key]
         output = adb("shell", *command)
-        if output.startswith(("Error: no phone", "Error: adb not found")):  # no point trying the other checks
+        if output.startswith(("Error: no phone", "Error: adb not found")):
             return output
         sentences.append(report(output))
     return " ".join(sentences)
-
 
 
 def navigate_to(destination: str) -> str:
@@ -176,11 +179,9 @@ def navigate_to(destination: str) -> str:
     Args:
         destination: Where the user wants to go: an address or the name of a place.
     """
-    # quote_plus makes the place safe inside a link: "Sofia airport" -> "Sofia+airport"
     output = adb("shell", "am", "start", "-a", "android.intent.action.VIEW",
                  "-d", f"google.navigation:q={quote_plus(destination)}")
     return output if output.startswith("Error") else f"Google Maps is navigating to {destination}."
-
 
 
 def parse_contacts(content_output):
@@ -206,7 +207,7 @@ def match_quality(contact, wanted):
 
 def contacts_matching(name):
     """Returns (matches, error): matches are the best-matching (contact, number) pairs, without duplicates."""
-    if DRY_RUN:  # no phone, so no contacts: pretend there is exactly one, to test what the LLM does next
+    if DRY_RUN:
         return [(name.title(), "0000000000")], None
     output = adb("shell", "content", "query", "--uri", "content://com.android.contacts/data/phones",
                  "--projection", "display_name:data1")
@@ -219,7 +220,6 @@ def contacts_matching(name):
         return [], None
     matches = []
     for contact, number in contacts:
-        # keep only the best kind of match, and each person + number once (phones often list a contact twice)
         if match_quality(contact, wanted) == best and (contact, clean_number(number)) not in matches:
             matches.append((contact, clean_number(number)))
     return matches, None
@@ -234,13 +234,13 @@ def number_for(contact):
     number = clean_number(contact)
     if number:
         return number, None
-    contact = contact.strip().removeprefix("my ").removeprefix("My ")  # "my brother" is saved as "Brother ..."
+    contact = contact.strip().removeprefix("my ").removeprefix("My ")
     matches, error = contacts_matching(contact)
     if error:
         return None, error
     if not matches:
         return None, f"Error: there is no contact called {contact}. Ask the user for the number."
-    if len(matches) > 1:  # several people, or one person with several numbers: the LLM must ask
+    if len(matches) > 1:
         names = [name for name, _ in matches]
         options = ", ".join(name if names.count(name) == 1 else f"{name} ({number})" for name, number in matches[:5])
         return None, f"Error: several contacts match {contact}: {options}. Ask the user which one."
@@ -261,8 +261,7 @@ def find_contact(name: str) -> str:
     return "; ".join(f"{contact}: {number}" for contact, number in matches[:5])
 
 
-
-SYSTEM_APPS = {"android", "com.android.systemui"}  # "USB debugging connected" and similar, not interesting
+SYSTEM_APPS = {"android", "com.android.systemui"}
 GENERIC_PARTS = {"com", "org", "net", "android", "google", "app", "apps"}
 
 
@@ -296,7 +295,6 @@ def parse_notifications(dumpsys_output):
             package = re.search(r"pkg=(\S+)", line)
             notifications.append({"app": package.group(1) if package else "?", "title": "", "text": ""})
             continue
-        # the ")" is missing when a long text continues on the next lines; then we keep just its first line
         field = re.match(r"android\.(title|text)=\w+ \((.*?)\)?$", line)
         if field and notifications:
             notifications[-1][field.group(1)] = field.group(2)
@@ -322,11 +320,10 @@ def read_notifications(app: str) -> str:
             continue
         item = f"{n['title']}: {n['text'][:120]}"
         items = by_app.setdefault(app_label(n["app"]), [])
-        if item not in items:  # the same notification can appear more than once in the dump
+        if item not in items:
             items.append(item)
     if not by_app:
         return "There are no notifications." if wanted in ("all", "") else f"There are no notifications from {app}."
-    # at most 2 per app, so one noisy app (e.g. sports scores) can't hide a real message
     parts = []
     for app, items in by_app.items():
         more = f" (+{len(items) - 2} more)" if len(items) > 2 else ""
