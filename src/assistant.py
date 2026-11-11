@@ -20,6 +20,7 @@ SYSTEM_PROMPT = (
 )
 MAX_TURNS = 6
 history = [{"role": "system", "content": SYSTEM_PROMPT}]
+used_tools = []
 
 
 def warm_up():
@@ -61,6 +62,7 @@ def ask_llm(transcript, max_new_tokens=150):
     """Send one ASR transcript to the LLM, run any tools it asks for, stream the answer and return it."""
     history.append({"role": "user", "content": transcript})
     del history[1:-(2 * MAX_TURNS + 1)]
+    used_tools.clear()
 
     while True:
         answer, tool_calls = "", []
@@ -83,4 +85,5 @@ def ask_llm(transcript, max_new_tokens=150):
         if not tool_calls:
             return answer.strip()
         for call in tool_calls:
+            used_tools.append(call.function.name)
             history.append({"role": "tool", "content": run_tool(call), "tool_name": call.function.name})

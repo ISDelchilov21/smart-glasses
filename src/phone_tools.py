@@ -2,6 +2,7 @@
 import re
 import shlex
 import subprocess
+from datetime import datetime, timedelta
 from urllib.parse import quote_plus
 
 DRY_RUN = False
@@ -57,6 +58,7 @@ def open_app(app_name: str) -> str:
 
 def make_phone_call(contact: str) -> str:
     """Call someone: opens the phone's dialer with their number; the user presses the call button.
+    Use this whenever the user wants to call, phone, ring or dial someone.
 
     Args:
         contact: The phone number, or the person's name as saved in the user's contacts.
@@ -76,6 +78,7 @@ def make_phone_call(contact: str) -> str:
 
 def send_sms(contact: str, message: str) -> str:
     """Open a text message to someone with the message filled in; the user presses send.
+    Use this whenever the user wants to text, message or SMS someone.
 
     Args:
         contact: The phone number, or the person's name as saved in the user's contacts.
@@ -89,7 +92,70 @@ def send_sms(contact: str, message: str) -> str:
     return output if output.startswith("Error") else f"The message to {number} is ready. The user must press send."
 
 
-def set_alarm(hour:int, minute:int):
+NUMBER_WORDS = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9,
+    "ten": 10, "eleven": 11, "twelve": 12, "fifteen": 15, "thirty": 30, "forty five": 45, "forty-five": 45,
+}
+
+
+def parse_alarm_time(text):
+    """Turn a spoken time into (hour, minute) in 24-hour time, or None if there is no time in it.
+
+    "2 pm" -> (14, 0), "7:30 am" -> (7, 30), "quarter past six in the evening" -> (18, 15),
+    "in 20 minutes" -> now + 20 minutes. The small LLM got "2 pm" wrong sometimes; code doesn't.
+    """
+    t = text.lower().replace("a.m.", "am").replace("p.m.", "pm")
+    if "noon" in t or "midday" in t:
+        return 12, 0
+    if "midnight" in t:
+        return 0, 0
+    for word, number in NUMBER_WORDS.items():
+        t = re.sub(rf"\b{word}\b", str(number), t)
+    t = re.sub(r"(\d)([a-z])", r"\1 \2", t)
+
+    later = re.search(r"\b(\d+) (minute|min|hour)", t)
+    if later:
+        amount = int(later.group(1))
+        delta = timedelta(hours=amount) if later.group(2) == "hour" else timedelta(minutes=amount)
+        when = datetime.now() + delta
+        return when.hour, when.minute
+
+    clock = re.search(r"\b(\d{1,2})[:.h ](\d{2})\b", t) or re.search(r"\b(\d{1,2})(\d{2})\b", t)
+    if clock:
+        hour, minute = int(clock.group(1)), int(clock.group(2))
+    else:
+        alone = re.search(r"\b(\d{1,2})\b", t)
+        if not alone:
+            return None
+        hour, minute = int(alone.group(1)), 0
+    if "quarter past" in t:
+        minute = 15
+    elif "half past" in t:
+        minute = 30
+    elif "quarter to" in t:
+        hour, minute = hour - 1, 45
+
+    if re.search(r"\bpm\b|afternoon|evening", t) and hour < 12:
+        hour += 12
+    elif re.search(r"\bnight\b|tonight", t) and 6 <= hour < 12:
+        hour += 12
+    elif re.search(r"\bam\b|morning", t) and hour == 12:
+        hour = 0
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return None
+    return hour, minute
+
+
+def set_alarm(time: str) -> str:
+    """Set an alarm on the user's phone. Only for alarms or waking up at a clock time, never for calling people.
+
+    Args:
+        time: The alarm time exactly as the user said it, with words like am, pm, morning or evening.
+    """
+    parsed = parse_alarm_time(time)
+    if parsed is None:
+        return f"Error: '{time}' is not a time. Ask the user what time the alarm should be."
+    hour, minute = parsed
     if DRY_RUN:
         print(f"   [dry run] set alarm for {hour}:{minute:02d}")
         return f"Set an alarm for {hour}:{minute:02d}."
@@ -248,7 +314,8 @@ def number_for(contact):
 
 
 def find_contact(name: str) -> str:
-    """Look up a person's phone number in the user's contacts, for example when asked "what is Alex's number".
+    """Tell the user a person's phone number from their contacts.
+    Only for questions about a number; to call or text someone, use make_phone_call or send_sms instead.
 
     Args:
         name: The person's name as the user said it.
@@ -330,4 +397,4 @@ def read_notifications(app: str) -> str:
         parts.append(f"{app}: " + "; ".join(items[:2]) + more)
     return " | ".join(parts)
 
-TOOLS = [open_app, make_phone_call, send_sms, phone_status, navigate_to, read_notifications]
+TOOLS = [open_app, make_phone_call, send_sms, phone_status, navigate_to, read_notifications, set_alarm, find_contact]
