@@ -3,18 +3,24 @@
 The same code as in llm_model.ipynb, moved into a module so jarvis.py can import it.
 """
 import json
+from datetime import datetime
 
 import ollama
 
 import phone_tools
+import web_tools
 
 LLM_ID = "qwen3:1.7b"
-TOOLS_BY_NAME = {tool.__name__: tool for tool in phone_tools.TOOLS}
+TOOLS = phone_tools.TOOLS + web_tools.TOOLS
+TOOLS_BY_NAME = {tool.__name__: tool for tool in TOOLS}
 
 SYSTEM_PROMPT = (
     "You are a helpful voice assistant on smart glasses. "
     "The user's words come from speech recognition and may contain mistakes; guess what they meant. "
-    "You can act on the user's Android phone with your tools; use a tool only when the user asks for a phone action. "
+    "With your tools you can act on the user's Android phone, check the weather and search the web; "
+    "use a tool only when the user's request needs one. "
+    "Never answer about the weather, news, prices or sports results from memory; call a tool. "
+    "When a tool can do what the user asks, call it right away: don't say you will do it and don't ask for permission. "
     "To call or text someone, pass their number or their name to the tool. Never make up phone numbers. "
     "Answer the user's latest message directly, in one or two short sentences."
 )
@@ -60,6 +66,7 @@ def run_tool(call):
 
 def ask_llm(transcript, max_new_tokens=150):
     """Send one ASR transcript to the LLM, run any tools it asks for, stream the answer and return it."""
+    history[0] = {"role": "system", "content": f"{SYSTEM_PROMPT} Right now it is {datetime.now():%A, %d %B %Y, %H:%M}."}
     history.append({"role": "user", "content": transcript})
     del history[1:-(2 * MAX_TURNS + 1)]
     used_tools.clear()
@@ -70,7 +77,7 @@ def ask_llm(transcript, max_new_tokens=150):
         for part in ollama.chat(
             model=LLM_ID,
             messages=history,
-            tools=phone_tools.TOOLS,
+            tools=TOOLS,
             stream=True,
             think=False,
             options={"temperature": 0.7, "num_predict": max_new_tokens},

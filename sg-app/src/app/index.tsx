@@ -1,6 +1,6 @@
 import { File, Paths } from 'expo-file-system';
-import { router } from 'expo-router';
-import { useRef, useState } from 'react';
+import { router, useLocalSearchParams } from 'expo-router';
+import { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Keyboard,
@@ -21,8 +21,10 @@ import { MessageBubble, type Message } from '@/components/message-bubble';
 import { StatusDot } from '@/components/status-dot';
 import { colors, fonts } from '@/constants/theme';
 import { useVoiceListener } from '@/hooks/use-voice-listener';
+import { askLocationPermission } from '@/lib/location';
 import { useServer, type JarvisReply } from '@/lib/server';
 import { useSettings } from '@/lib/settings';
+import { ENROLL_CLIPS } from '@/lib/voice-listener';
 
 let nextId = 1;
 const newId = () => String(nextId++);
@@ -37,10 +39,23 @@ function errorText(error: unknown) {
   return error instanceof Error ? error.message : 'Something went wrong.';
 }
 
+function matchNote(voiceMatch?: number) {
+  return voiceMatch === undefined ? undefined : `Voice match ${voiceMatch.toFixed(2)}`;
+}
+
+async function saveWav(name: string, wav: Uint8Array) {
+  const file = new File(Paths.cache, name);
+  file.create({ overwrite: true });
+  await file.write(wav);
+  return file;
+}
+
 export default function ChatScreen() {
   const insets = useSafeAreaInsets();
-  const { status, checkServer, ask, askWithAudio } = useServer();
-  const { wakeWordOn } = useSettings();
+  const { status, checkServer, ask, askWithAudio, enrollVoice } = useServer();
+  const { wakeWordOn, backgroundOn } = useSettings();
+  const { enroll } = useLocalSearchParams<{ enroll?: string }>();
+  const [enrollCount, setEnrollCount] = useState(0);
   const [messages, setMessages] = useState<Message[]>([GREETING]);
   const [draft, setDraft] = useState('');
   const [thinking, setThinking] = useState(false);
@@ -62,7 +77,8 @@ export default function ChatScreen() {
       if (voiceMessageId) {
         setMessageText(voiceMessageId, reply.heard || '(nothing heard)');
       }
-      addMessage({ role: 'jarvis', text: reply.text, tools: reply.tools });
+      addMessage({ role: 'jarvis', text: reply.text, tools: reply.tools, note: matchNote(reply.voiceMatch) });
+      listener.notify(`Jarvis: ${reply.text}`);
     } catch (error) {
       if (voiceMessageId) {
         setMessageText(voiceMessageId, 'Voice message');
@@ -83,23 +99,52 @@ export default function ChatScreen() {
     await getReply(() => ask(text));
   }
 
-  async function sendVoice(wav: Uint8Array) {
-    const file = new File(Paths.cache, 'voice.wav');
-    file.create({ overwrite: true });
-    await file.write(wav);
+  async function sendVoice(wav: Uint8Array, wakeClip: Uint8Array | null) {
+    const voiceFile = await saveWav('voice.wav', wav);
+    const wakeFile = wakeClip ? await saveWav('wake.wav', wakeClip) : null;
     const id = newId();
     setMessages((old) => [...old, { id, role: 'user', text: 'Voice message…', voice: true }]);
-    await getReply(() => askWithAudio(file.uri), id);
-    file.delete();
+    await getReply(() => askWithAudio(voiceFile.uri, wakeFile?.uri), id);
+    voiceFile.delete();
+    wakeFile?.delete();
+  }
+
+  async function saveVoiceProfile(clips: Uint8Array[]) {
+    setThinking(true);
+    const files = await Promise.all(clips.map((clip, index) => saveWav(`enroll${index}.wav`, clip)));
+    try {
+      const similarities = await enrollVoice(files.map((file) => file.uri));
+      const matches = similarities.map((similarity) => similarity.toFixed(2)).join(', ');
+      addMessage({ role: 'jarvis', text: `Got it, I know your voice now. Match of each try: ${matches}.` });
+    } catch (error) {
+      addMessage({ role: 'error', text: errorText(error) });
+    } finally {
+      files.forEach((file) => file.delete());
+      setThinking(false);
+    }
   }
 
   const listener = useVoiceListener({
     wakeWordOn,
+    background: backgroundOn,
     paused: thinking,
     onCommand: sendVoice,
     onNothingHeard: () => addMessage({ role: 'jarvis', text: "I didn't hear anything." }),
+    onEnrollProgress: setEnrollCount,
+    onEnrollDone: saveVoiceProfile,
     onError: (message) => addMessage({ role: 'error', text: message }),
   });
+
+  useEffect(() => {
+    askLocationPermission();
+  }, []);
+
+  useEffect(() => {
+    if (enroll === '1') {
+      router.setParams({ enroll: '' });
+      listener.startEnroll();
+    }
+  }, [enroll, listener]);
 
   function startListening() {
     Keyboard.dismiss();
@@ -107,7 +152,11 @@ export default function ChatScreen() {
   }
 
   const micHint =
-    listener.mode === 'wake' ? 'Listening for "Hey Jarvis", or tap to talk' : 'Tap to talk';
+    listener.mode !== 'wake'
+      ? 'Tap to talk'
+      : backgroundOn
+        ? 'Listening for "Hey Jarvis", also in the background'
+        : 'Listening for "Hey Jarvis", or tap to talk';
 
   return (
     <KeyboardAvoidingView style={styles.screen} behavior="padding">
@@ -181,6 +230,14 @@ export default function ChatScreen() {
 
       {listener.mode === 'command' && (
         <ListeningOverlay onSend={listener.finishCommand} onCancel={listener.cancelCommand} />
+      )}
+      {listener.mode === 'enroll' && (
+        <ListeningOverlay
+          title="Say “Hey Jarvis”"
+          detail={`${enrollCount} of ${ENROLL_CLIPS}`}
+          hint="Say it 5 times in your normal voice, with a short pause each time"
+          onCancel={listener.cancelEnroll}
+        />
       )}
     </KeyboardAvoidingView>
   );

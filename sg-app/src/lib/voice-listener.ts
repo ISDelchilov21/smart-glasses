@@ -4,16 +4,21 @@ import { FRAME_LENGTH, SAMPLE_RATE, WAKE_THRESHOLD, WakeWordDetector } from '@/l
 import { loadWakeWordModels } from '@/lib/wake-word-models';
 import { encodeWav } from '@/lib/wav';
 
-export type ListenerMode = 'off' | 'wake' | 'command';
+export type ListenerMode = 'off' | 'wake' | 'command' | 'enroll';
 
 export type ListenerEvents = {
   onModeChange: (mode: ListenerMode) => void;
-  onCommand: (wav: Uint8Array) => void;
+  onCommand: (wav: Uint8Array, wakeClip: Uint8Array | null) => void;
   onNothingHeard: () => void;
+  onEnrollProgress: (count: number) => void;
+  onEnrollDone: (clips: Uint8Array[]) => void;
   onError: (message: string) => void;
 };
 
+export const ENROLL_CLIPS = 5;
+const ENROLL_THRESHOLD = 0.3;
 const FRAMES_PER_SECOND = SAMPLE_RATE / FRAME_LENGTH;
+const WAKE_CLIP_FRAMES = Math.round(2 * FRAMES_PER_SECOND);
 const END_SILENCE_FRAMES = Math.round(1.2 * FRAMES_PER_SECOND);
 const GIVE_UP_FRAMES = Math.round(6 * FRAMES_PER_SECOND);
 const MAX_COMMAND_FRAMES = Math.round(15 * FRAMES_PER_SECOND);
@@ -44,9 +49,12 @@ export class VoiceListener {
   queue: Promise<void> = Promise.resolve();
   queued = 0;
   noiseLevels: number[] = [];
+  recent: number[][] = [];
+  wakeClip: Uint8Array | null = null;
   command: number[][] = [];
   heardSpeech = false;
   silentFrames = 0;
+  enrollClips: Uint8Array[] = [];
 
   constructor(events: ListenerEvents) {
     this.events = events;
@@ -60,11 +68,18 @@ export class VoiceListener {
     this.setMode('off');
   }
 
+  async loadDetector() {
+    if (!this.detector) {
+      this.detector = new WakeWordDetector(await loadWakeWordModels());
+    }
+    return this.detector;
+  }
+
   async setWakeWord(on: boolean) {
     this.wakeWordOn = on;
-    if (on && !this.detector) {
+    if (on) {
       try {
-        this.detector = new WakeWordDetector(await loadWakeWordModels());
+        await this.loadDetector();
       } catch (error) {
         this.wakeWordOn = false;
         this.events.onError(`The wake word could not start: ${errorMessage(error)}`);
@@ -75,16 +90,18 @@ export class VoiceListener {
 
   async setPaused(paused: boolean) {
     this.paused = paused;
-    if (paused && this.mode === 'command') {
+    if (paused && (this.mode === 'command' || this.mode === 'enroll')) {
       this.command = [];
+      this.enrollClips = [];
     }
     await this.refresh(paused);
   }
 
-  async startCommand() {
+  async startCommand(wakeClip: Uint8Array | null = null) {
     this.command = [];
     this.heardSpeech = false;
     this.silentFrames = 0;
+    this.wakeClip = wakeClip;
     await this.setMode('command');
   }
 
@@ -98,7 +115,7 @@ export class VoiceListener {
     this.detector?.reset();
     this.refresh(true);
     if (wanted) {
-      this.events.onCommand(encodeWav(frames, SAMPLE_RATE));
+      this.events.onCommand(encodeWav(frames, SAMPLE_RATE), this.wakeClip);
     } else {
       this.events.onNothingHeard();
     }
@@ -110,8 +127,28 @@ export class VoiceListener {
     this.refresh(true);
   }
 
-  async refresh(leaveCommand = false) {
-    if (this.mode === 'command' && !leaveCommand) {
+  async startEnroll() {
+    try {
+      await this.loadDetector();
+    } catch (error) {
+      this.events.onError(`The wake word could not start: ${errorMessage(error)}`);
+      return;
+    }
+    this.enrollClips = [];
+    this.recent = [];
+    this.detector?.reset();
+    this.events.onEnrollProgress(0);
+    await this.setMode('enroll');
+  }
+
+  cancelEnroll() {
+    this.enrollClips = [];
+    this.detector?.reset();
+    this.refresh(true);
+  }
+
+  async refresh(leaveBusyMode = false) {
+    if ((this.mode === 'command' || this.mode === 'enroll') && !leaveBusyMode) {
       return;
     }
     const listenForWakeWord = this.wakeWordOn && this.detector && !this.paused;
@@ -148,14 +185,20 @@ export class VoiceListener {
   handleFrame = (frame: number[]) => {
     if (this.mode === 'command') {
       this.addCommandFrame(frame);
-    } else if (this.mode === 'wake') {
-      this.noiseLevels = [...this.noiseLevels.slice(1 - NOISE_HISTORY), loudness(frame)];
-      if (this.queued >= MAX_QUEUED_FRAMES) {
-        return;
-      }
-      this.queued++;
-      this.queue = this.queue.then(() => this.checkWakeWord(frame)).finally(() => this.queued--);
+      return;
     }
+    if (this.mode !== 'wake' && this.mode !== 'enroll') {
+      return;
+    }
+    this.recent = [...this.recent.slice(1 - WAKE_CLIP_FRAMES), frame];
+    if (this.mode === 'wake') {
+      this.noiseLevels = [...this.noiseLevels.slice(1 - NOISE_HISTORY), loudness(frame)];
+    }
+    if (this.queued >= MAX_QUEUED_FRAMES) {
+      return;
+    }
+    this.queued++;
+    this.queue = this.queue.then(() => this.checkWakeWord(frame)).finally(() => this.queued--);
   };
 
   speechLevel() {
@@ -164,18 +207,42 @@ export class VoiceListener {
     return Math.max(noise * 3, MIN_SPEECH_LEVEL);
   }
 
+  takeRecentClip() {
+    const clip = encodeWav(this.recent, SAMPLE_RATE);
+    this.recent = [];
+    return clip;
+  }
+
   async checkWakeWord(frame: number[]) {
-    if (this.mode !== 'wake' || !this.detector) {
+    const mode = this.mode;
+    if ((mode !== 'wake' && mode !== 'enroll') || !this.detector) {
       return;
     }
     try {
       const score = await this.detector.score(frame);
-      if (score >= WAKE_THRESHOLD && this.mode === 'wake') {
+      if (this.mode !== mode) {
+        return;
+      }
+      if (mode === 'wake' && score >= WAKE_THRESHOLD) {
         this.detector.reset();
-        await this.startCommand();
+        await this.startCommand(this.takeRecentClip());
+      } else if (mode === 'enroll' && score >= ENROLL_THRESHOLD) {
+        this.detector.reset();
+        this.addEnrollClip(this.takeRecentClip());
       }
     } catch (error) {
       this.events.onError(`Wake word problem: ${errorMessage(error)}`);
+    }
+  }
+
+  addEnrollClip(clip: Uint8Array) {
+    this.enrollClips.push(clip);
+    this.events.onEnrollProgress(this.enrollClips.length);
+    if (this.enrollClips.length >= ENROLL_CLIPS) {
+      const clips = this.enrollClips;
+      this.enrollClips = [];
+      this.refresh(true);
+      this.events.onEnrollDone(clips);
     }
   }
 

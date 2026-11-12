@@ -1,13 +1,17 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from 'react';
 
+import { currentPlace } from '@/lib/location';
+
 export const DEFAULT_SERVER_URL = 'http://localhost:8000';
 const STORAGE_KEY = 'serverUrl';
 const HEALTH_TIMEOUT_MS = 4000;
 const ANSWER_TIMEOUT_MS = 180000;
 
 export type ServerStatus = 'checking' | 'online' | 'offline';
-export type JarvisReply = { text: string; tools: string[]; heard?: string };
+export type JarvisReply = { text: string; tools: string[]; heard?: string; voiceMatch?: number };
+
+type ReplyJson = { text?: string; tools?: string[]; heard?: string | null; voice_match?: number | null };
 
 type ServerContextValue = {
   serverUrl: string;
@@ -15,7 +19,8 @@ type ServerContextValue = {
   status: ServerStatus;
   checkServer: () => Promise<void>;
   ask: (text: string) => Promise<JarvisReply>;
-  askWithAudio: (uri: string) => Promise<JarvisReply>;
+  askWithAudio: (uri: string, wakeUri?: string | null) => Promise<JarvisReply>;
+  enrollVoice: (uris: string[]) => Promise<number[]>;
 };
 
 const ServerContext = createContext<ServerContextValue | null>(null);
@@ -43,6 +48,19 @@ async function getStatus(serverUrl: string): Promise<ServerStatus> {
   }
 }
 
+function wavFile(uri: string, name: string) {
+  return { uri, name, type: 'audio/wav' } as unknown as Blob;
+}
+
+function toReply(data: ReplyJson): JarvisReply {
+  return {
+    text: data.text || 'Jarvis had no answer.',
+    tools: data.tools ?? [],
+    heard: data.heard ?? undefined,
+    voiceMatch: data.voice_match ?? undefined,
+  };
+}
+
 export function ServerProvider({ children }: { children: ReactNode }) {
   const [serverUrl, setServerUrlState] = useState(DEFAULT_SERVER_URL);
   const [status, setStatus] = useState<ServerStatus>('checking');
@@ -68,7 +86,7 @@ export function ServerProvider({ children }: { children: ReactNode }) {
   }, [serverUrl]);
 
   const post = useCallback(
-    async (path: string, options: RequestInit): Promise<JarvisReply> => {
+    async <T,>(path: string, options: RequestInit): Promise<T> => {
       let response: Response;
       try {
         response = await fetchWithTimeout(`${serverUrl}${path}`, ANSWER_TIMEOUT_MS, { method: 'POST', ...options });
@@ -87,26 +105,49 @@ export function ServerProvider({ children }: { children: ReactNode }) {
       if (!response.ok) {
         throw new Error(`The server had a problem (error ${response.status}). Check its terminal.`);
       }
-      const data: { text?: string; tools?: string[]; heard?: string | null } = await response.json();
-      return { text: data.text || 'Jarvis had no answer.', tools: data.tools ?? [], heard: data.heard ?? undefined };
+      return (await response.json()) as T;
     },
     [serverUrl],
   );
 
   const ask = useCallback(
-    (text: string) =>
-      post('/process_text', {
+    async (text: string) => {
+      const place = await currentPlace();
+      const data = await post<ReplyJson>('/process_text', {
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text }),
-      }),
+        body: JSON.stringify({ text, ...place }),
+      });
+      return toReply(data);
+    },
     [post],
   );
 
   const askWithAudio = useCallback(
-    (uri: string) => {
+    async (uri: string, wakeUri?: string | null) => {
       const form = new FormData();
-      form.append('audio', { uri, name: 'voice.wav', type: 'audio/wav' } as unknown as Blob);
-      return post('/process_audio', { body: form });
+      form.append('audio', wavFile(uri, 'voice.wav'));
+      if (wakeUri) {
+        form.append('wake', wavFile(wakeUri, 'wake.wav'));
+      }
+      const place = await currentPlace();
+      if (place) {
+        form.append('latitude', String(place.latitude));
+        form.append('longitude', String(place.longitude));
+        if (place.city) {
+          form.append('city', place.city);
+        }
+      }
+      return toReply(await post<ReplyJson>('/process_audio', { body: form }));
+    },
+    [post],
+  );
+
+  const enrollVoice = useCallback(
+    async (uris: string[]) => {
+      const form = new FormData();
+      uris.forEach((uri, index) => form.append('clips', wavFile(uri, `clip${index}.wav`)));
+      const data = await post<{ similarities: number[] }>('/enroll_voice', { body: form });
+      return data.similarities;
     },
     [post],
   );
@@ -124,7 +165,7 @@ export function ServerProvider({ children }: { children: ReactNode }) {
   }, [serverUrl]);
 
   return (
-    <ServerContext.Provider value={{ serverUrl, setServerUrl, status, checkServer, ask, askWithAudio }}>
+    <ServerContext.Provider value={{ serverUrl, setServerUrl, status, checkServer, ask, askWithAudio, enrollVoice }}>
       {children}
     </ServerContext.Provider>
   );

@@ -150,7 +150,7 @@ def set_alarm(time: str) -> str:
     """Set an alarm on the user's phone. Only for alarms or waking up at a clock time, never for calling people.
 
     Args:
-        time: The alarm time exactly as the user said it, with words like am, pm, morning or evening.
+        time: The alarm time in the user's own words, copied exactly without converting it.
     """
     parsed = parse_alarm_time(time)
     if parsed is None:

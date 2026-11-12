@@ -9,6 +9,7 @@ export type Message = {
   text: string;
   tools?: string[];
   voice?: boolean;
+  note?: string;
 };
 
 export function MessageBubble({ message }: { message: Message }) {
@@ -35,6 +36,7 @@ export function MessageBubble({ message }: { message: Message }) {
           </Text>
         </View>
       ))}
+      {message.note && <Text style={[styles.toolText, styles.note]}>{message.note}</Text>}
     </View>
   );
 }
@@ -64,4 +66,5 @@ const styles = StyleSheet.create({
   toolRow: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingLeft: 4 },
   toolText: { fontFamily: fonts.regular, fontSize: 12, color: colors.textMuted },
   code: { fontFamily: monoFont },
+  note: { paddingLeft: 4 },
 });

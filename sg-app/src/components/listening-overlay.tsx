@@ -6,7 +6,10 @@ import { MicIcon } from '@/components/icons';
 import { colors, fonts } from '@/constants/theme';
 
 type Props = {
-  onSend: () => void;
+  title?: string;
+  detail?: string;
+  hint?: string;
+  onSend?: () => void;
   onCancel: () => void;
 };
 
@@ -15,7 +18,13 @@ function formatTime(millis: number) {
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
 }
 
-export function ListeningOverlay({ onSend, onCancel }: Props) {
+export function ListeningOverlay({
+  title = 'Listening…',
+  detail,
+  hint = 'I send it when you stop talking, or tap the mic',
+  onSend,
+  onCancel,
+}: Props) {
   const insets = useSafeAreaInsets();
   const [elapsed, setElapsed] = useState(0);
 
@@ -42,19 +51,21 @@ export function ListeningOverlay({ onSend, onCancel }: Props) {
           <Pressable
             accessibilityRole="button"
             accessibilityLabel="Send what you said"
+            accessibilityState={{ disabled: !onSend }}
+            disabled={!onSend}
             onPress={onSend}
             style={styles.micButton}>
             <MicIcon color={colors.onAccent} size={44} />
           </Pressable>
         </View>
         <View style={styles.texts}>
-          <Text style={styles.listening}>Listening…</Text>
-          <Text style={styles.time}>{formatTime(elapsed)}</Text>
+          <Text style={styles.listening}>{title}</Text>
+          <Text style={styles.time}>{detail ?? formatTime(elapsed)}</Text>
         </View>
       </View>
 
       <View style={styles.footer}>
-        <Text style={styles.hint}>I send it when you stop talking, or tap the mic</Text>
+        <Text style={styles.hint}>{hint}</Text>
         <Pressable accessibilityRole="button" onPress={onCancel} style={styles.cancelButton}>
           <Text style={styles.cancelText}>Cancel</Text>
         </Pressable>

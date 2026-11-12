@@ -1,8 +1,9 @@
 import { router } from 'expo-router';
 import { useState } from 'react';
-import { Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
+import { PermissionsAndroid, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import BackgroundListening from '../../modules/background-listening';
 import { BackIcon, GlassesIcon, MicIcon, ShieldIcon } from '@/components/icons';
 import { StatusDot } from '@/components/status-dot';
 import { colors, fonts, monoFont } from '@/constants/theme';
@@ -12,8 +13,16 @@ import { useSettings } from '@/lib/settings';
 export default function SettingsScreen() {
   const insets = useSafeAreaInsets();
   const { serverUrl, setServerUrl, status, checkServer } = useServer();
-  const { wakeWordOn, setWakeWordOn } = useSettings();
+  const { wakeWordOn, setWakeWordOn, backgroundOn, setBackgroundOn } = useSettings();
   const [address, setAddress] = useState(serverUrl);
+  const backgroundAvailable = BackgroundListening !== null;
+
+  async function changeBackground(on: boolean) {
+    if (on) {
+      await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS);
+    }
+    setBackgroundOn(on);
+  }
 
   function testConnection() {
     if (cleanUrl(address) === serverUrl) {
@@ -76,8 +85,7 @@ export default function SettingsScreen() {
                 Listen for “Hey Jarvis”
               </Text>
               <Text style={styles.helper}>
-                Only while Jarvis is open. The sound is checked on this phone; nothing is sent until you say “Hey
-                Jarvis”.
+                The sound is checked on this phone; nothing is sent until you say “Hey Jarvis”.
               </Text>
             </View>
             <Switch
@@ -87,6 +95,43 @@ export default function SettingsScreen() {
               trackColor={{ false: colors.inputBorder, true: colors.accent }}
               thumbColor={colors.text}
             />
+          </View>
+          <View style={[styles.card, styles.cardRow, styles.centered]}>
+            <View style={styles.cardText}>
+              <Text style={styles.cardTitle} nativeID="background-label">
+                Keep listening in the background
+              </Text>
+              <Text style={styles.helper}>
+                {backgroundAvailable
+                  ? 'Also when Jarvis is closed. A notification shows that it is listening. Uses more battery.'
+                  : 'Needs a new build of the app.'}
+              </Text>
+            </View>
+            <Switch
+              value={backgroundOn && backgroundAvailable}
+              onValueChange={changeBackground}
+              disabled={!backgroundAvailable || !wakeWordOn}
+              accessibilityLabelledBy="background-label"
+              trackColor={{ false: colors.inputBorder, true: colors.accent }}
+              thumbColor={colors.text}
+            />
+          </View>
+        </View>
+
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Voice check</Text>
+          <View style={styles.card}>
+            <Text style={styles.cardTitle}>Only react to my voice</Text>
+            <Text style={styles.helper}>
+              Say “Hey Jarvis” 5 times. After that, Jarvis ignores other people who say it. Your voiceprint is saved
+              on your laptop.
+            </Text>
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => router.navigate('/?enroll=1')}
+              style={[styles.outlineButton, styles.alignStart]}>
+              <Text style={styles.outlineButtonText}>Teach Jarvis my voice</Text>
+            </Pressable>
           </View>
         </View>
 
@@ -203,5 +248,6 @@ const styles = StyleSheet.create({
   },
   smallButtonText: { fontFamily: fonts.semibold, fontSize: 14, color: colors.text },
   disabled: { opacity: 0.4 },
+  alignStart: { alignSelf: 'flex-start' },
   version: { textAlign: 'center', fontFamily: fonts.regular, fontSize: 12, color: colors.textMuted },
 });
