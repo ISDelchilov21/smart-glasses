@@ -1,4 +1,5 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { File } from 'expo-file-system';
 import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from 'react';
 
 import { currentPlace } from '@/lib/location';
@@ -48,8 +49,8 @@ async function getStatus(serverUrl: string): Promise<ServerStatus> {
   }
 }
 
-function wavFile(uri: string, name: string) {
-  return { uri, name, type: 'audio/wav' } as unknown as Blob;
+function wavFile(uri: string) {
+  return new File(uri) as unknown as Blob;
 }
 
 function toReply(data: ReplyJson): JarvisReply {
@@ -125,9 +126,9 @@ export function ServerProvider({ children }: { children: ReactNode }) {
   const askWithAudio = useCallback(
     async (uri: string, wakeUri?: string | null) => {
       const form = new FormData();
-      form.append('audio', wavFile(uri, 'voice.wav'));
+      form.append('audio', wavFile(uri));
       if (wakeUri) {
-        form.append('wake', wavFile(wakeUri, 'wake.wav'));
+        form.append('wake', wavFile(wakeUri));
       }
       const place = await currentPlace();
       if (place) {
@@ -145,7 +146,7 @@ export function ServerProvider({ children }: { children: ReactNode }) {
   const enrollVoice = useCallback(
     async (uris: string[]) => {
       const form = new FormData();
-      uris.forEach((uri, index) => form.append('clips', wavFile(uri, `clip${index}.wav`)));
+      uris.forEach((uri) => form.append('clips', wavFile(uri)));
       const data = await post<{ similarities: number[] }>('/enroll_voice', { body: form });
       return data.similarities;
     },
